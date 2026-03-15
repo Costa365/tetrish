@@ -37,7 +37,7 @@ BG_COLORS[7]="48;5;208"
 FG_COLORS[7]="38;5;208"
 
 cleanup() {
-  stty sane 2>/dev/null || true
+  stty echo icanon 2>/dev/null || true
   printf '\033[?25h\033[0m\033[2J\033[H'
 }
 
