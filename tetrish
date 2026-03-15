@@ -1,0 +1,472 @@
+#!/usr/bin/env bash
+# TetriSH - Tetris in pure Bash
+# Controls: ← → move, ↓ soft drop, ↑ hard drop, X rotate CW, Y rotate CCW, Q quit
+
+set -u
+
+BOARD_W=10
+BOARD_H=20
+BOARD_SIZE=$((BOARD_W * BOARD_H))
+TICK_RATE=0.02
+
+LEVEL=0
+TOTAL_LINES=0
+SCORE=0
+GAME_OVER=0
+QUIT=0
+PIECE_X=0
+PIECE_Y=0
+PIECE_TYPE=0
+PIECE_ROT=0
+NEXT_TYPE=0
+DROP_DELAY=800
+NEXT_DROP_MS=0
+SOFT_DROP_BONUS=0
+LOCK_DELAY=0
+
+declare -a BOARD
+declare -a BAG=()
+
+# Colors: piece types 1-7
+#   1=I(cyan) 2=O(yellow) 3=T(magenta) 4=S(green) 5=Z(red) 6=J(blue) 7=L(orange)
+FG_COLORS=("" "36" "33" "35" "32" "31" "34" "33")
+BG_COLORS=("" "46" "43" "45" "42" "41" "44" "43")
+# Orange approximation: use bright red for L-piece
+BG_COLORS[7]="48;5;208"
+FG_COLORS[7]="38;5;208"
+
+cleanup() {
+  stty sane 2>/dev/null || true
+  printf '\033[?25h\033[0m\033[2J\033[H'
+}
+
+trap cleanup EXIT INT TERM
+
+init_board() {
+  local i
+  for ((i = 0; i < BOARD_SIZE; i++)); do
+    BOARD[i]=0
+  done
+}
+
+fill_bag() {
+  BAG=(0 1 2 3 4 5 6)
+  local i j tmp
+  for ((i = 6; i > 0; i--)); do
+    j=$((RANDOM % (i + 1)))
+    tmp=${BAG[i]}
+    BAG[i]=${BAG[j]}
+    BAG[j]=$tmp
+  done
+}
+
+bag_next() {
+  # Sets BAG_RESULT instead of printing, to avoid subshell
+  if ((${#BAG[@]} == 0)); then
+    fill_bag
+  fi
+  BAG_RESULT=${BAG[0]}
+  BAG=("${BAG[@]:1}")
+}
+
+drop_delay_for_level() {
+  case "$1" in
+    0) echo 800 ;;  1) echo 717 ;;  2) echo 633 ;;  3) echo 550 ;;
+    4) echo 467 ;;  5) echo 383 ;;  6) echo 300 ;;  7) echo 217 ;;
+    8) echo 133 ;;  9) echo 100 ;;
+    10|11|12) echo 83 ;;
+    13|14|15) echo 67 ;;
+    16|17|18) echo 50 ;;
+    19|20|21|22|23|24|25|26|27|28) echo 33 ;;
+    *) echo 17 ;;
+  esac
+}
+
+now_ms() {
+  local ts
+  ts=$(date +%s%3N 2>/dev/null) || ts=
+  if [[ -n "$ts" && "$ts" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$ts"
+  else
+    printf '%s000' "$SECONDS"
+  fi
+}
+
+schedule_next_drop() {
+  NEXT_DROP_MS=$(($(now_ms) + DROP_DELAY))
+}
+
+# Shape data: 4x4 grid encoded as 16-char string, '#' = filled
+shape_data() {
+  case "$1:$2" in
+    0:0) printf '....####........' ;;
+    0:1) printf '..#...#...#...#.' ;;
+    0:2) printf '........####....' ;;
+    0:3) printf '.#...#...#...#..' ;;
+    1:0|1:1|1:2|1:3) printf '.##..##.........' ;;
+    2:0) printf '.#..###.........' ;;
+    2:1) printf '.#...##..#......' ;;
+    2:2) printf '....###..#......' ;;
+    2:3) printf '.#..##...#......' ;;
+    3:0) printf '.##.##..........' ;;
+    3:1) printf '.#...##...#.....' ;;
+    3:2) printf '....##.##.......' ;;
+    3:3) printf '#...##...#......' ;;
+    4:0) printf '##...##.........' ;;
+    4:1) printf '..#..##..#......' ;;
+    4:2) printf '....##...##.....' ;;
+    4:3) printf '.#..##..#.......' ;;
+    5:0) printf '#...###.........' ;;
+    5:1) printf '.##..#...#......' ;;
+    5:2) printf '....###...#.....' ;;
+    5:3) printf '.#...#..##......' ;;
+    6:0) printf '..#.###.........' ;;
+    6:1) printf '.#...#...##.....' ;;
+    6:2) printf '....###.#.......' ;;
+    6:3) printf '##...#...#......' ;;
+    *) printf '................' ;;
+  esac
+}
+
+shape_cell() {
+  printf '%s' "${1:$(($3 * 4 + $2)):1}"
+}
+
+collision() {
+  local test_x="$1" test_y="$2" test_type="$3" test_rot="$4"
+  local shape px py bx by
+  shape=$(shape_data "$test_type" "$test_rot")
+  for ((py = 0; py < 4; py++)); do
+    for ((px = 0; px < 4; px++)); do
+      [[ "${shape:$((py * 4 + px)):1}" != "#" ]] && continue
+      bx=$((test_x + px))
+      by=$((test_y + py))
+      if ((bx < 0 || bx >= BOARD_W || by >= BOARD_H)); then
+        return 0
+      fi
+      if ((by >= 0)) && ((BOARD[by * BOARD_W + bx] != 0)); then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+merge_piece() {
+  local shape px py bx by
+  shape=$(shape_data "$PIECE_TYPE" "$PIECE_ROT")
+  for ((py = 0; py < 4; py++)); do
+    for ((px = 0; px < 4; px++)); do
+      [[ "${shape:$((py * 4 + px)):1}" != "#" ]] && continue
+      bx=$((PIECE_X + px))
+      by=$((PIECE_Y + py))
+      if ((by >= 0 && by < BOARD_H && bx >= 0 && bx < BOARD_W)); then
+        BOARD[by * BOARD_W + bx]=$((PIECE_TYPE + 1))
+      fi
+    done
+  done
+}
+
+clear_lines() {
+  local y x full cleared=0
+  for ((y = BOARD_H - 1; y >= 0; y--)); do
+    full=1
+    for ((x = 0; x < BOARD_W; x++)); do
+      if ((BOARD[y * BOARD_W + x] == 0)); then
+        full=0
+        break
+      fi
+    done
+    if ((full)); then
+      ((cleared++))
+      local row
+      for ((row = y; row > 0; row--)); do
+        for ((x = 0; x < BOARD_W; x++)); do
+          BOARD[row * BOARD_W + x]=${BOARD[(row - 1) * BOARD_W + x]}
+        done
+      done
+      for ((x = 0; x < BOARD_W; x++)); do
+        BOARD[x]=0
+      done
+      ((y++))  # recheck this row
+    fi
+  done
+
+  if ((cleared > 0)); then
+    case "$cleared" in
+      1) SCORE=$((SCORE + 40 * (LEVEL + 1))) ;;
+      2) SCORE=$((SCORE + 100 * (LEVEL + 1))) ;;
+      3) SCORE=$((SCORE + 300 * (LEVEL + 1))) ;;
+      4) SCORE=$((SCORE + 1200 * (LEVEL + 1))) ;;
+    esac
+    TOTAL_LINES=$((TOTAL_LINES + cleared))
+    LEVEL=$((TOTAL_LINES / 10))
+    DROP_DELAY=$(drop_delay_for_level "$LEVEL")
+  fi
+}
+
+ghost_y() {
+  local gy=$PIECE_Y
+  while ! collision "$PIECE_X" $((gy + 1)) "$PIECE_TYPE" "$PIECE_ROT"; do
+    ((gy++))
+  done
+  printf '%d' "$gy"
+}
+
+spawn_piece() {
+  PIECE_TYPE=$NEXT_TYPE
+  bag_next
+  NEXT_TYPE=$BAG_RESULT
+  PIECE_ROT=0
+  PIECE_X=3
+  PIECE_Y=-1
+  LOCK_DELAY=0
+  SOFT_DROP_BONUS=0
+  schedule_next_drop
+  if collision "$PIECE_X" "$PIECE_Y" "$PIECE_TYPE" "$PIECE_ROT"; then
+    GAME_OVER=1
+  fi
+}
+
+try_move() {
+  if collision $((PIECE_X + $1)) $((PIECE_Y + $2)) "$PIECE_TYPE" "$PIECE_ROT"; then
+    return 1
+  fi
+  PIECE_X=$((PIECE_X + $1))
+  PIECE_Y=$((PIECE_Y + $2))
+  return 0
+}
+
+try_rotate() {
+  local dir="$1"
+  local new_rot=$(((PIECE_ROT + dir + 4) % 4))
+  local kick
+  for kick in 0 -1 1 -2 2; do
+    if ! collision $((PIECE_X + kick)) "$PIECE_Y" "$PIECE_TYPE" "$new_rot"; then
+      PIECE_X=$((PIECE_X + kick))
+      PIECE_ROT=$new_rot
+      return 0
+    fi
+  done
+  return 1
+}
+
+hard_drop() {
+  local dist=0
+  while ! collision "$PIECE_X" $((PIECE_Y + 1)) "$PIECE_TYPE" "$PIECE_ROT"; do
+    PIECE_Y=$((PIECE_Y + 1))
+    ((dist++))
+  done
+  SCORE=$((SCORE + dist * 2))
+  lock_piece
+}
+
+lock_piece() {
+  SCORE=$((SCORE + SOFT_DROP_BONUS))
+  merge_piece
+  clear_lines
+  spawn_piece
+}
+
+# --- Rendering ---
+
+colored_block() {
+  # $1 = piece type (1-7)
+  printf '\033[%s;1m[]\033[0m' "${FG_COLORS[$1]}"
+}
+
+colored_block_bg() {
+  # $1 = piece type (1-7), solid block with bg color
+  printf '\033[%sm  \033[0m' "${BG_COLORS[$1]}"
+}
+
+ghost_block() {
+  printf '\033[90m::\033[0m'
+}
+
+render() {
+  local y x idx cell shape gy screen
+  shape=$(shape_data "$PIECE_TYPE" "$PIECE_ROT")
+  gy=$(ghost_y)
+
+  # Build ghost lookup
+  local ghost_shape
+  ghost_shape=$(shape_data "$PIECE_TYPE" "$PIECE_ROT")
+  declare -A ghost_map=()
+  declare -A piece_map=()
+  local px py bx by
+  for ((py = 0; py < 4; py++)); do
+    for ((px = 0; px < 4; px++)); do
+      [[ "${ghost_shape:$((py * 4 + px)):1}" != "#" ]] && continue
+      bx=$((PIECE_X + px))
+      # Ghost
+      by=$((gy + py))
+      if ((by >= 0 && by < BOARD_H && bx >= 0 && bx < BOARD_W)); then
+        ghost_map["$by,$bx"]=1
+      fi
+      # Active piece
+      by=$((PIECE_Y + py))
+      if ((by >= 0 && by < BOARD_H && bx >= 0 && bx < BOARD_W)); then
+        piece_map["$by,$bx"]=1
+      fi
+    done
+  done
+
+  screen='\033[H'
+  screen+='\033[1m  TetriSH\033[0m\n\n'
+
+  # Top border
+  screen+='  \033[90m╔'
+  for ((x = 0; x < BOARD_W; x++)); do screen+='══'; done
+  screen+='╗\033[0m\n'
+
+  local next_shape
+  next_shape=$(shape_data "$NEXT_TYPE" 0)
+
+  for ((y = 0; y < BOARD_H; y++)); do
+    screen+='  \033[90m║\033[0m'
+    for ((x = 0; x < BOARD_W; x++)); do
+      local key="$y,$x"
+      if [[ -n "${piece_map[$key]:-}" ]]; then
+        screen+="\033[${BG_COLORS[$((PIECE_TYPE + 1))]}m  \033[0m"
+      elif [[ -n "${ghost_map[$key]:-}" ]]; then
+        screen+='\033[90m░░\033[0m'
+      else
+        cell=${BOARD[y * BOARD_W + x]}
+        if ((cell > 0)); then
+          screen+="\033[${BG_COLORS[$cell]}m  \033[0m"
+        else
+          screen+='\033[40m \033[90m.\033[0m'
+        fi
+      fi
+    done
+    screen+='\033[90m║\033[0m'
+
+    # Side panel
+    case "$y" in
+      0) screen+="   \033[1mSCORE\033[0m" ;;
+      1) screen+="   $SCORE" ;;
+      3) screen+="   \033[1mLEVEL\033[0m" ;;
+      4) screen+="   $LEVEL" ;;
+      6) screen+="   \033[1mLINES\033[0m" ;;
+      7) screen+="   $TOTAL_LINES" ;;
+      9) screen+="   \033[1mNEXT\033[0m" ;;
+      10|11|12|13)
+        local nr=$((y - 10))
+        screen+="   "
+        for ((px = 0; px < 4; px++)); do
+          if [[ "${next_shape:$((nr * 4 + px)):1}" == "#" ]]; then
+            screen+="\033[${BG_COLORS[$((NEXT_TYPE + 1))]}m  \033[0m"
+          else
+            screen+="  "
+          fi
+        done
+        ;;
+      15) screen+="   \033[2m← →  Move\033[0m" ;;
+      16) screen+="   \033[2m↓    Soft drop\033[0m" ;;
+      17) screen+="   \033[2m↑    Hard drop\033[0m" ;;
+      18) screen+="   \033[2mX    Rotate CW\033[0m" ;;
+      19) screen+="   \033[2mZ    Rotate CCW\033[0m" ;;
+    esac
+    screen+='\n'
+  done
+
+  # Bottom border
+  screen+='  \033[90m╚'
+  for ((x = 0; x < BOARD_W; x++)); do screen+='══'; done
+  screen+='╝\033[0m\n'
+
+  if ((GAME_OVER)); then
+    screen+='\n  \033[1;97;41m  GAME OVER  \033[0m\n'
+    screen+='  Press Q to quit\n'
+  fi
+
+  printf '%b' "$screen"
+}
+
+handle_input() {
+  local key="$1" next
+
+  case "$key" in
+    $'\e')
+      if read -rsn1 -t 0.001 next; then
+        key+="$next"
+        if [[ "$next" == "[" ]] && read -rsn1 -t 0.001 next; then
+          key+="$next"
+        fi
+      fi
+      ;;
+  esac
+
+  if ((GAME_OVER)); then
+    [[ "$key" == "q" || "$key" == "Q" ]] && { QUIT=1; return 1; }
+    return 0
+  fi
+
+  case "$key" in
+    $'\e[D') try_move -1 0 ;;
+    $'\e[C') try_move 1 0 ;;
+    $'\e[B')
+      if ! collision "$PIECE_X" $((PIECE_Y + 1)) "$PIECE_TYPE" "$PIECE_ROT"; then
+        PIECE_Y=$((PIECE_Y + 1))
+        SCORE=$((SCORE + 1))
+        SOFT_DROP_BONUS=$((SOFT_DROP_BONUS + 1))
+        schedule_next_drop
+      fi
+      ;;
+    $'\e[A') hard_drop ;;
+    x|X) try_rotate 1 ;;
+    z|Z) try_rotate -1 ;;
+    q|Q) QUIT=1; return 1 ;;
+  esac
+  return 0
+}
+
+tick() {
+  ((GAME_OVER)) && return
+  local current_ms
+  current_ms=$(now_ms)
+  ((current_ms < NEXT_DROP_MS)) && return
+  schedule_next_drop
+
+  if ! collision "$PIECE_X" $((PIECE_Y + 1)) "$PIECE_TYPE" "$PIECE_ROT"; then
+    PIECE_Y=$((PIECE_Y + 1))
+    LOCK_DELAY=0
+  else
+    LOCK_DELAY=$((LOCK_DELAY + 1))
+    if ((LOCK_DELAY >= 1)); then
+      lock_piece
+    fi
+  fi
+}
+
+main() {
+  if ! command -v stty >/dev/null 2>&1; then
+    echo "stty is required." >&2
+    exit 1
+  fi
+
+  init_board
+  fill_bag
+  bag_next
+  NEXT_TYPE=$BAG_RESULT
+  DROP_DELAY=$(drop_delay_for_level "$LEVEL")
+  spawn_piece
+
+  stty -echo -icanon time 0 min 0
+  printf '\033[?25h\033[2J'
+  hide_cursor_seq='\033[?25l'
+  printf '%b' "$hide_cursor_seq"
+
+  local key
+  while :; do
+    render
+    key=
+    if read -rsn1 -t "$TICK_RATE" key; then
+      handle_input "$key" || break
+    fi
+    tick
+  done
+}
+
+main "$@"
