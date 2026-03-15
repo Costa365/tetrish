@@ -14,6 +14,7 @@ TOTAL_LINES=0
 SCORE=0
 GAME_OVER=0
 QUIT=0
+PAUSED=0
 PIECE_X=0
 PIECE_Y=0
 PIECE_TYPE=0
@@ -109,11 +110,11 @@ shape_data() {
     2:2) printf '....###..#......' ;;
     2:3) printf '.#..##...#......' ;;
     3:0) printf '.##.##..........' ;;
-    3:1) printf '.#...##...#.....' ;;
-    3:2) printf '....##.##.......' ;;
+    3:1) printf '#...##...#......' ;;
+    3:2) printf '.....##.##......' ;;
     3:3) printf '#...##...#......' ;;
     4:0) printf '##...##.........' ;;
-    4:1) printf '..#..##..#......' ;;
+    4:1) printf '.#..##..#.......' ;;
     4:2) printf '....##...##.....' ;;
     4:3) printf '.#..##..#.......' ;;
     5:0) printf '#...###.........' ;;
@@ -362,11 +363,12 @@ render() {
           fi
         done
         ;;
-      15) screen+="   \033[2m← →  Move\033[0m" ;;
-      16) screen+="   \033[2m↓    Soft drop\033[0m" ;;
-      17) screen+="   \033[2m↑    Hard drop\033[0m" ;;
-      18) screen+="   \033[2mX    Rotate CW\033[0m" ;;
-      19) screen+="   \033[2mZ    Rotate CCW\033[0m" ;;
+      14) screen+="   \033[2m← →  Move\033[0m" ;;
+      15) screen+="   \033[2m↓    Soft drop\033[0m" ;;
+      16) screen+="   \033[2m↑    Hard drop\033[0m" ;;
+      17) screen+="   \033[2mX    Rotate CW\033[0m" ;;
+      18) screen+="   \033[2mZ    Rotate CCW\033[0m" ;;
+      19) screen+="   \033[2mP    Pause\033[0m" ;;
     esac
     screen+='\n'
   done
@@ -376,10 +378,16 @@ render() {
   for ((x = 0; x < BOARD_W; x++)); do screen+='══'; done
   screen+='╝\033[0m\n'
 
-  if ((GAME_OVER)); then
-    screen+='\n  \033[1;97;41m  GAME OVER  \033[0m\n'
-    screen+='  Press Q to quit\n'
+  if ((PAUSED)); then
+    screen+='\n  \033[1;97;44m    PAUSED    \033[0m\033[K\n'
+    screen+='  Press P to resume\033[K'
+  elif ((GAME_OVER)); then
+    screen+='\n  \033[1;97;41m  GAME OVER  \033[0m\033[K\n'
+    screen+='  Press Q to quit\033[K'
+  else
+    screen+='\033[K\n\033[K'
   fi
+  screen+='\033[J'
 
   printf '%b' "$screen"
 }
@@ -403,6 +411,18 @@ handle_input() {
     return 0
   fi
 
+  if [[ "$key" == "p" || "$key" == "P" ]]; then
+    if ((PAUSED)); then
+      PAUSED=0
+      schedule_next_drop
+    else
+      PAUSED=1
+    fi
+    return 0
+  fi
+
+  ((PAUSED)) && return 0
+
   case "$key" in
     $'\e[D') try_move -1 0 ;;
     $'\e[C') try_move 1 0 ;;
@@ -423,7 +443,7 @@ handle_input() {
 }
 
 tick() {
-  ((GAME_OVER)) && return
+  ((GAME_OVER || PAUSED)) && return
   local current_ms
   current_ms=$(now_ms)
   ((current_ms < NEXT_DROP_MS)) && return

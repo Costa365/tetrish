@@ -15,6 +15,7 @@ Pure Bash Tetris for Linux terminals with minimal dependencies.
 - Up arrow: hard drop
 - `x`: rotate clockwise
 - `y`: rotate counter-clockwise
+- `p`: pause / unpause
 - `q`: quit
 
 ## Notes
