@@ -84,10 +84,19 @@ drop_delay_for_level() {
 }
 
 now_ms() {
+  # Wall-clock milliseconds, so game speed is independent of CPU speed.
+  # Prefer bash's EPOCHREALTIME (no fork, locale-independent separator).
+  if [[ -n "${EPOCHREALTIME:-}" ]]; then
+    local sec=${EPOCHREALTIME%[.,]*} frac=${EPOCHREALTIME#*[.,]}000
+    printf '%s%s' "$sec" "${frac:0:3}"
+    return
+  fi
+  # Fallback: nanoseconds from date, truncated to ms. Don't rely on %3N,
+  # which some date implementations (e.g. uutils) don't honor.
   local ts
-  ts=$(date +%s%3N 2>/dev/null) || ts=
-  if [[ -n "$ts" && "$ts" =~ ^[0-9]+$ ]]; then
-    printf '%s' "$ts"
+  ts=$(date +%s%N 2>/dev/null) || ts=
+  if [[ "$ts" =~ ^[0-9]{13,}$ ]]; then
+    printf '%s' "${ts:0:13}"
   else
     printf '%s000' "$SECONDS"
   fi
