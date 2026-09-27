@@ -23,4 +23,5 @@ Pure Bash Tetris for Linux terminals with minimal dependencies.
 
 - Uses ANSI terminal escapes and `stty`.
 - Shows the next piece.
+- Shows game play keys.
 - Uses a 10x20 board and classic single/dual/triple/tetris scoring.
