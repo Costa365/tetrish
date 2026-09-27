@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # TetriSH - Tetris in pure Bash
 # Controls: ← → move, ↓ soft drop, ↑ hard drop, X rotate CW, Y rotate CCW, Q quit
+#           S start a new game after game over
 
 set -u
 
@@ -405,7 +406,7 @@ render() {
     screen+='  Press P to resume\033[K'
   elif ((GAME_OVER)); then
     screen+='\n  \033[1;97;41m  GAME OVER  \033[0m\033[K\n'
-    screen+='  Press Q to quit\033[K'
+    screen+='  Press S to start a new game or Q to quit\033[K'
   else
     screen+='\033[K\n\033[K'
   fi
@@ -429,7 +430,10 @@ handle_input() {
   esac
 
   if ((GAME_OVER)); then
-    [[ "$key" == "q" || "$key" == "Q" ]] && { QUIT=1; return 1; }
+    case "$key" in
+      q|Q) QUIT=1; return 1 ;;
+      s|S) new_game ;;
+    esac
     return 0
   fi
 
@@ -494,18 +498,27 @@ tick() {
   fi
 }
 
-main() {
-  if ! command -v stty >/dev/null 2>&1; then
-    echo "stty is required." >&2
-    exit 1
-  fi
-
+new_game() {
+  LEVEL=0
+  TOTAL_LINES=0
+  SCORE=0
+  GAME_OVER=0
+  PAUSED=0
   init_board
   fill_bag
   bag_next
   NEXT_TYPE=$BAG_RESULT
   DROP_DELAY=$(drop_delay_for_level "$LEVEL")
   spawn_piece
+}
+
+main() {
+  if ! command -v stty >/dev/null 2>&1; then
+    echo "stty is required." >&2
+    exit 1
+  fi
+
+  new_game
 
   stty -echo -icanon time 0 min 0
   printf '\033[?25h\033[2J'
