@@ -25,6 +25,14 @@ NEXT_DROP_MS=0
 SOFT_DROP_BONUS=0
 LOCK_DELAY=0
 
+# Terminals don't report key releases, so a held drop key keeps auto-repeating
+# onto the next piece. After a piece spawns while a drop key is held, ignore
+# drop keys until the repeat stream stops.
+REPEAT_GAP_MS=150        # longer than the auto-repeat interval
+REPEAT_INITIAL_MS=700    # longer than the delay before auto-repeat starts
+LAST_DROP_KEY_MS=0
+DROP_SUPPRESS_UNTIL_MS=0
+
 declare -a BOARD
 declare -a BAG=()
 
@@ -232,7 +240,12 @@ spawn_piece() {
   PIECE_Y=-1
   LOCK_DELAY=0
   SOFT_DROP_BONUS=0
-  schedule_next_drop
+  local current_ms
+  current_ms=$(now_ms)
+  if ((current_ms - LAST_DROP_KEY_MS < REPEAT_GAP_MS)); then
+    DROP_SUPPRESS_UNTIL_MS=$((current_ms + REPEAT_INITIAL_MS))
+  fi
+  NEXT_DROP_MS=$((current_ms + DROP_DELAY))
   if collision "$PIECE_X" "$PIECE_Y" "$PIECE_TYPE" "$PIECE_ROT"; then
     GAME_OVER=1
   fi
@@ -431,6 +444,18 @@ handle_input() {
   fi
 
   ((PAUSED)) && return 0
+
+  if [[ "$key" == $'\e[A' || "$key" == $'\e[B' ]]; then
+    LAST_DROP_KEY_MS=$(now_ms)
+    if ((LAST_DROP_KEY_MS < DROP_SUPPRESS_UNTIL_MS)); then
+      # Still auto-repeating from the previous piece; extend and ignore
+      DROP_SUPPRESS_UNTIL_MS=$((LAST_DROP_KEY_MS + REPEAT_GAP_MS))
+      return 0
+    fi
+  else
+    # Pressing any other key stops the terminal's auto-repeat
+    DROP_SUPPRESS_UNTIL_MS=0
+  fi
 
   case "$key" in
     $'\e[D') try_move -1 0 ;;
